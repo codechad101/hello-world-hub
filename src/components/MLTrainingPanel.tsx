@@ -3,20 +3,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Brain, Upload, TrendingUp, BarChart3, StopCircle, PlayCircle } from "lucide-react";
+import { Brain, Upload, TrendingUp, BarChart3, StopCircle, PlayCircle, Moon, Sun, LineChart as LineChartIcon } from "lucide-react";
 import { toast } from "sonner";
 import { SymbolSearch } from "./SymbolSearch";
-import { parseCSV, CandleData } from "@/utils/mlTraining";
+import { parseCSV, CandleData, backtestStrategy, DEFAULT_PARAMS } from "@/utils/mlTraining";
 import {
   createInitialPopulation,
   evaluatePopulation,
   evolvePopulation,
   Individual
 } from "@/utils/geneticOptimizer";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface TrainingMetrics {
   accuracy: number;
-  precision: number; // We'll map profit to this for now or add a new field
+  precision: number;
   recall: number;
   samples: number;
   generation: number;
@@ -29,6 +30,9 @@ export const MLTrainingPanel = () => {
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [metrics, setMetrics] = useState<TrainingMetrics | null>(null);
   const [bestStrategy, setBestStrategy] = useState<Individual | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [backtestData, setBacktestData] = useState<{ time: string; balance: number }[]>([]);
+  const [candles, setCandles] = useState<CandleData[]>([]);
 
   const trainingRef = useRef<boolean>(false);
   const populationRef = useRef<Individual[]>([]);
@@ -41,7 +45,16 @@ export const MLTrainingPanel = () => {
     };
   }, []);
 
-  const runTrainingStep = async (candles: CandleData[]) => {
+  // Toggle Dark Mode
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [isDarkMode]);
+
+  const runTrainingStep = async (currentCandles: CandleData[]) => {
     if (!trainingRef.current) return;
 
     // 1. Initialize or Evolve
@@ -52,7 +65,7 @@ export const MLTrainingPanel = () => {
     }
 
     // 2. Evaluate
-    populationRef.current = evaluatePopulation(populationRef.current, candles);
+    populationRef.current = evaluatePopulation(populationRef.current, currentCandles);
     const best = populationRef.current[0];
     setBestStrategy(best);
     generationRef.current += 1;
@@ -60,28 +73,28 @@ export const MLTrainingPanel = () => {
     // 3. Update UI
     setMetrics({
       accuracy: best.accuracy,
-      precision: best.profit, // Using precision field for profit display temporarily
+      precision: best.profit,
       recall: 0,
-      samples: candles.length,
+      samples: currentCandles.length,
       generation: generationRef.current,
       bestProfit: best.profit
     });
 
-    setTrainingProgress((prev) => (prev + 10) % 100); // Visual indicator only
+    setTrainingProgress((prev) => (prev + 10) % 100);
 
     // 4. Continue Loop
-    // Use setTimeout to allow UI updates and prevent freezing
-    setTimeout(() => runTrainingStep(candles), 100);
+    setTimeout(() => runTrainingStep(currentCandles), 100);
   };
 
-  const startTraining = async (candles: CandleData[]) => {
-    if (candles.length < 50) {
+  const startTraining = async (currentCandles: CandleData[]) => {
+    if (currentCandles.length < 50) {
       toast.error("Insufficient data", {
         description: "Need at least 50 data points for training.",
       });
       return;
     }
 
+    setCandles(currentCandles);
     setIsTraining(true);
     trainingRef.current = true;
     generationRef.current = 0;
@@ -90,7 +103,7 @@ export const MLTrainingPanel = () => {
       description: "Optimizing strategy parameters... Click Stop to finish.",
     });
 
-    runTrainingStep(candles);
+    runTrainingStep(currentCandles);
   };
 
   const stopTraining = () => {
@@ -107,8 +120,9 @@ export const MLTrainingPanel = () => {
 
     try {
       const text = await file.text();
-      const candles = parseCSV(text);
-      startTraining(candles);
+      const parsedCandles = parseCSV(text);
+      setCandles(parsedCandles);
+      startTraining(parsedCandles);
     } catch (error) {
       console.error("Training error:", error);
       toast.error("Training failed", {
@@ -123,26 +137,52 @@ export const MLTrainingPanel = () => {
       return;
     }
 
-    // Mock data generation for demo purposes if no real API is connected yet
-    // In a real app, this would fetch from an API
     const mockCandles: CandleData[] = Array.from({ length: 500 }, (_, i) => ({
       timestamp: Date.now() - (500 - i) * 60000,
       open: 100 + Math.random() * 10,
       high: 110 + Math.random() * 10,
       low: 90 + Math.random() * 10,
-      close: 100 + Math.random() * 10 + (i * 0.1), // Slight uptrend
+      close: 100 + Math.random() * 10 + (i * 0.1),
       volume: 1000 + Math.random() * 5000,
     }));
 
+    setCandles(mockCandles);
     startTraining(mockCandles);
   };
 
+  const runBacktest = () => {
+    if (candles.length === 0) {
+      toast.error("No data loaded", { description: "Please upload data or auto-train first." });
+      return;
+    }
+
+    const params = bestStrategy ? bestStrategy.params : DEFAULT_PARAMS;
+    const result = backtestStrategy(candles, params);
+
+    if (result.equityCurve) {
+      const formattedData = result.equityCurve.map(pt => ({
+        time: new Date(pt.time).toLocaleDateString(),
+        balance: Math.round(pt.balance)
+      }));
+      setBacktestData(formattedData);
+
+      toast.success("Backtest Complete", {
+        description: `Profit: ${result.profit.toFixed(2)}% | Trades: ${result.trades}`
+      });
+    }
+  };
+
   return (
-    <Card>
+    <Card className="w-full max-w-4xl mx-auto">
       <CardHeader>
-        <div className="flex items-center gap-2">
-          <Brain className="w-5 h-5 text-primary" />
-          <CardTitle>Intelligent ML Training</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Brain className="w-5 h-5 text-primary" />
+            <CardTitle>Intelligent ML Training</CardTitle>
+          </div>
+          <Button variant="ghost" size="icon" onClick={() => setIsDarkMode(!isDarkMode)}>
+            {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+          </Button>
         </div>
         <CardDescription>
           Continuous genetic optimization of trading parameters.
@@ -151,9 +191,10 @@ export const MLTrainingPanel = () => {
       </CardHeader>
       <CardContent>
         <Tabs defaultValue="auto" className="w-full">
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="auto">Auto Train</TabsTrigger>
             <TabsTrigger value="upload">Upload Data</TabsTrigger>
+            <TabsTrigger value="backtest">Backtest & Graph</TabsTrigger>
           </TabsList>
 
           <TabsContent value="upload" className="space-y-4">
@@ -196,6 +237,45 @@ export const MLTrainingPanel = () => {
                   <StopCircle className="w-4 h-4 mr-2" />
                   Stop Training
                 </Button>
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="backtest" className="space-y-4">
+            <div className="flex flex-col gap-4">
+              <Button onClick={runBacktest} className="w-full" disabled={candles.length === 0}>
+                <LineChartIcon className="w-4 h-4 mr-2" />
+                Run Backtest with Best Strategy
+              </Button>
+
+              {backtestData.length > 0 ? (
+                <div className="h-[300px] w-full bg-card border rounded-lg p-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={backtestData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? "#333" : "#eee"} />
+                      <XAxis dataKey="time" stroke={isDarkMode ? "#888" : "#666"} fontSize={12} tickMargin={10} />
+                      <YAxis stroke={isDarkMode ? "#888" : "#666"} fontSize={12} domain={['auto', 'auto']} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: isDarkMode ? "#1f2937" : "#fff",
+                          borderColor: isDarkMode ? "#374151" : "#e5e7eb",
+                          color: isDarkMode ? "#fff" : "#000"
+                        }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="balance"
+                        stroke="#22c55e"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-[200px] flex items-center justify-center border rounded-lg border-dashed text-muted-foreground">
+                  No backtest data available. Train model first.
+                </div>
               )}
             </div>
           </TabsContent>

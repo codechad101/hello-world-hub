@@ -89,7 +89,7 @@ export const calculateMACD = (
 
   // For signal line, we'd need to calculate EMA of MACD values
   // Simplified version here for performance in loops
-  const signal = macd * 0.9; 
+  const signal = macd * 0.9;
 
   return { macd, signal };
 };
@@ -167,8 +167,8 @@ export const generateSignal = (
   let bearishScore = 0;
 
   // RSI signals
-  if (features.rsi < params.rsiOversold) bullishScore += 2; 
-  if (features.rsi > params.rsiOverbought) bearishScore += 2; 
+  if (features.rsi < params.rsiOversold) bullishScore += 2;
+  if (features.rsi > params.rsiOverbought) bearishScore += 2;
 
   // MACD signals
   if (features.macd > features.macdSignal) bullishScore += 2;
@@ -204,47 +204,59 @@ export const generateSignal = (
 };
 
 // Backtest a strategy on a set of candles
-export const backtestStrategy = (candles: CandleData[], params: StrategyParams): { profit: number; accuracy: number; trades: number } => {
-    let balance = 10000;
-    let position = 0; // 0 = no position, 1 = long
-    let entryPrice = 0;
-    let wins = 0;
-    let totalTrades = 0;
+export const backtestStrategy = (candles: CandleData[], params: StrategyParams): { profit: number; accuracy: number; trades: number; equityCurve: { time: number; balance: number }[] } => {
+  let balance = 10000;
+  let position = 0; // 0 = no position, 1 = long
+  let entryPrice = 0;
+  let wins = 0;
+  let totalTrades = 0;
+  const equityCurve = [{ time: candles[0].timestamp, balance }];
 
-    // Need enough data for indicators
-    const minDataPoints = Math.max(params.smaSlowPeriod, params.macdSlow + params.macdSignal, params.rsiPeriod) + 1;
+  // Need enough data for indicators
+  const minDataPoints = Math.max(params.smaSlowPeriod, params.macdSlow + params.macdSignal, params.rsiPeriod) + 1;
 
-    for (let i = minDataPoints; i < candles.length; i++) {
-        const subset = candles.slice(0, i + 1);
-        const features = extractFeatures(subset, params);
-        const { signal } = generateSignal(features, params);
-        const currentPrice = candles[i].close;
+  for (let i = minDataPoints; i < candles.length; i++) {
+    const subset = candles.slice(0, i + 1);
+    const features = extractFeatures(subset, params);
+    const { signal } = generateSignal(features, params);
+    const currentPrice = candles[i].close;
 
-        if (signal === "BUY" && position === 0) {
-            position = 1;
-            entryPrice = currentPrice;
-        } else if (signal === "SELL" && position === 1) {
-            position = 0;
-            const profit = (currentPrice - entryPrice) / entryPrice;
-            balance = balance * (1 + profit);
-            if (profit > 0) wins++;
-            totalTrades++;
-        }
+    if (signal === "BUY" && position === 0) {
+      position = 1;
+      entryPrice = currentPrice;
+    } else if (signal === "SELL" && position === 1) {
+      position = 0;
+      const profit = (currentPrice - entryPrice) / entryPrice;
+      balance = balance * (1 + profit);
+      if (profit > 0) wins++;
+      totalTrades++;
     }
 
-    // Close final position
+    // Record equity at every step (or just on trade close for cleaner graph, but every step is better for time)
+    // If holding, mark to market
+    let currentEquity = balance;
     if (position === 1) {
-        const currentPrice = candles[candles.length - 1].close;
-        const profit = (currentPrice - entryPrice) / entryPrice;
-        balance = balance * (1 + profit);
-        if (profit > 0) wins++;
-        totalTrades++;
+      const unrealizedProfit = (currentPrice - entryPrice) / entryPrice;
+      currentEquity = balance * (1 + unrealizedProfit);
     }
+    equityCurve.push({ time: candles[i].timestamp, balance: currentEquity });
+  }
 
-    const accuracy = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-    const profitPercent = ((balance - 10000) / 10000) * 100;
+  // Close final position
+  if (position === 1) {
+    const currentPrice = candles[candles.length - 1].close;
+    const profit = (currentPrice - entryPrice) / entryPrice;
+    balance = balance * (1 + profit);
+    if (profit > 0) wins++;
+    totalTrades++;
+    // Update final point
+    equityCurve[equityCurve.length - 1].balance = balance;
+  }
 
-    return { profit: profitPercent, accuracy, trades: totalTrades };
+  const accuracy = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+  const profitPercent = ((balance - 10000) / 10000) * 100;
+
+  return { profit: profitPercent, accuracy, trades: totalTrades, equityCurve };
 };
 
 // Parse CSV data
