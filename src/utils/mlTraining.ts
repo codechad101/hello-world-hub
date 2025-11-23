@@ -12,12 +12,38 @@ export interface TrainingFeatures {
   rsi: number;
   macd: number;
   macdSignal: number;
-  sma20: number;
-  sma50: number;
+  smaFast: number;
+  smaSlow: number;
   volumeRatio: number;
   priceChange: number;
   volatility: number;
 }
+
+export interface StrategyParams {
+  rsiPeriod: number;
+  rsiOverbought: number;
+  rsiOversold: number;
+  macdFast: number;
+  macdSlow: number;
+  macdSignal: number;
+  smaFastPeriod: number;
+  smaSlowPeriod: number;
+  volatilityPeriod: number;
+  volumeThreshold: number;
+}
+
+export const DEFAULT_PARAMS: StrategyParams = {
+  rsiPeriod: 14,
+  rsiOverbought: 70,
+  rsiOversold: 30,
+  macdFast: 12,
+  macdSlow: 26,
+  macdSignal: 9,
+  smaFastPeriod: 20,
+  smaSlowPeriod: 50,
+  volatilityPeriod: 20,
+  volumeThreshold: 1.5,
+};
 
 // Calculate RSI (Relative Strength Index)
 export const calculateRSI = (prices: number[], period: number = 14): number => {
@@ -62,8 +88,8 @@ export const calculateMACD = (
   const macd = emaFast - emaSlow;
 
   // For signal line, we'd need to calculate EMA of MACD values
-  // Simplified version here
-  const signal = macd * 0.9; // Approximation
+  // Simplified version here for performance in loops
+  const signal = macd * 0.9; 
 
   return { macd, signal };
 };
@@ -103,15 +129,15 @@ export const calculateVolatility = (prices: number[], period: number = 20): numb
 };
 
 // Extract all features for ML training
-export const extractFeatures = (candles: CandleData[]): TrainingFeatures => {
+export const extractFeatures = (candles: CandleData[], params: StrategyParams = DEFAULT_PARAMS): TrainingFeatures => {
   const closes = candles.map((c) => c.close);
   const volumes = candles.map((c) => c.volume);
 
-  const rsi = calculateRSI(closes);
-  const { macd, signal } = calculateMACD(closes);
-  const sma20 = calculateSMA(closes, 20);
-  const sma50 = calculateSMA(closes, 50);
-  const volatility = calculateVolatility(closes);
+  const rsi = calculateRSI(closes, params.rsiPeriod);
+  const { macd, signal } = calculateMACD(closes, params.macdFast, params.macdSlow, params.macdSignal);
+  const smaFast = calculateSMA(closes, params.smaFastPeriod);
+  const smaSlow = calculateSMA(closes, params.smaSlowPeriod);
+  const volatility = calculateVolatility(closes, params.volatilityPeriod);
 
   const avgVolume = volumes.reduce((sum, v) => sum + v, 0) / volumes.length;
   const currentVolume = volumes[volumes.length - 1] || 0;
@@ -124,8 +150,8 @@ export const extractFeatures = (candles: CandleData[]): TrainingFeatures => {
     rsi,
     macd,
     macdSignal: signal,
-    sma20,
-    sma50,
+    smaFast,
+    smaSlow,
     volumeRatio,
     priceChange,
     volatility,
@@ -134,27 +160,27 @@ export const extractFeatures = (candles: CandleData[]): TrainingFeatures => {
 
 // Generate trading signal based on features
 export const generateSignal = (
-  features: TrainingFeatures
+  features: TrainingFeatures,
+  params: StrategyParams = DEFAULT_PARAMS
 ): { signal: "BUY" | "SELL" | "HOLD"; confidence: number } => {
   let bullishScore = 0;
   let bearishScore = 0;
 
   // RSI signals
-  if (features.rsi < 30) bullishScore += 2; // Oversold
-  if (features.rsi > 70) bearishScore += 2; // Overbought
+  if (features.rsi < params.rsiOversold) bullishScore += 2; 
+  if (features.rsi > params.rsiOverbought) bearishScore += 2; 
 
   // MACD signals
   if (features.macd > features.macdSignal) bullishScore += 2;
   if (features.macd < features.macdSignal) bearishScore += 2;
 
   // Moving average signals
-  const currentPrice = features.sma20; // Using as proxy
-  if (features.sma20 > features.sma50) bullishScore += 1.5;
-  if (features.sma20 < features.sma50) bearishScore += 1.5;
+  if (features.smaFast > features.smaSlow) bullishScore += 1.5;
+  if (features.smaFast < features.smaSlow) bearishScore += 1.5;
 
   // Volume signals
-  if (features.volumeRatio > 1.5 && features.priceChange > 0) bullishScore += 1;
-  if (features.volumeRatio > 1.5 && features.priceChange < 0) bearishScore += 1;
+  if (features.volumeRatio > params.volumeThreshold && features.priceChange > 0) bullishScore += 1;
+  if (features.volumeRatio > params.volumeThreshold && features.priceChange < 0) bearishScore += 1;
 
   // Volatility consideration
   const volatilityFactor = Math.min(features.volatility / 10, 1);
@@ -175,6 +201,50 @@ export const generateSignal = (
   confidence = confidence * (1 - volatilityFactor * 0.3);
 
   return { signal, confidence: Math.round(confidence) };
+};
+
+// Backtest a strategy on a set of candles
+export const backtestStrategy = (candles: CandleData[], params: StrategyParams): { profit: number; accuracy: number; trades: number } => {
+    let balance = 10000;
+    let position = 0; // 0 = no position, 1 = long
+    let entryPrice = 0;
+    let wins = 0;
+    let totalTrades = 0;
+
+    // Need enough data for indicators
+    const minDataPoints = Math.max(params.smaSlowPeriod, params.macdSlow + params.macdSignal, params.rsiPeriod) + 1;
+
+    for (let i = minDataPoints; i < candles.length; i++) {
+        const subset = candles.slice(0, i + 1);
+        const features = extractFeatures(subset, params);
+        const { signal } = generateSignal(features, params);
+        const currentPrice = candles[i].close;
+
+        if (signal === "BUY" && position === 0) {
+            position = 1;
+            entryPrice = currentPrice;
+        } else if (signal === "SELL" && position === 1) {
+            position = 0;
+            const profit = (currentPrice - entryPrice) / entryPrice;
+            balance = balance * (1 + profit);
+            if (profit > 0) wins++;
+            totalTrades++;
+        }
+    }
+
+    // Close final position
+    if (position === 1) {
+        const currentPrice = candles[candles.length - 1].close;
+        const profit = (currentPrice - entryPrice) / entryPrice;
+        balance = balance * (1 + profit);
+        if (profit > 0) wins++;
+        totalTrades++;
+    }
+
+    const accuracy = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+    const profitPercent = ((balance - 10000) / 10000) * 100;
+
+    return { profit: profitPercent, accuracy, trades: totalTrades };
 };
 
 // Parse CSV data
